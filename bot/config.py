@@ -34,3 +34,17 @@ PICKUP_OPTIONS = {
 
 PAYMENT_METHOD = "cash_on_pickup"
 PAYMENT_LABEL = "Оплата при получении"
+
+# Только тестовый провайдер Telegram Payments.
+YOOKASSA_PROVIDER_TOKEN = os.getenv("YOOKASSA_PROVIDER_TOKEN", "").strip()
+if YOOKASSA_PROVIDER_TOKEN and ":TEST:" not in YOOKASSA_PROVIDER_TOKEN:
+    raise ValueError("Для учебного проекта требуется тестовый токен ЮKassa (:TEST:).")
+PAYMENT_LABELS = {
+    PAYMENT_METHOD: PAYMENT_LABEL,
+    "yookassa_test": "ЮKassa — тестовая оплата",
+}
+PAYMENT_STATUS_LABELS = {
+    "unpaid": "При получении",
+    "pending": "Ожидает тестовой оплаты",
+    "paid": "Оплачено (тестовый платёж)",
+}

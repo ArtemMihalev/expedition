@@ -1,3 +1,4 @@
+from bot.ui import show_text
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -28,7 +29,7 @@ async def show_menu(
     markup = keyboards.main_menu(is_manager=is_manager)
 
     if isinstance(target, CallbackQuery):
-        await target.message.edit_text(WELCOME_TEXT, reply_markup=markup)
+        await show_text(target.message, WELCOME_TEXT, reply_markup=markup)
         await target.answer()
     else:
         await target.answer(WELCOME_TEXT, reply_markup=markup)

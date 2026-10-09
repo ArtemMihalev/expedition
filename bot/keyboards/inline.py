@@ -18,9 +18,10 @@ class Keyboards:
         if is_manager:
             builder.row(
                 InlineKeyboardButton(
-                    text="👔 Новые заказы", callback_data="manager_orders"
+                    text="👔 Заказы в работе", callback_data="manager_orders"
                 )
             )
+            builder.row(InlineKeyboardButton(text="📦 Склад", callback_data="stock"))
         return builder.as_markup()
 
     @staticmethod
@@ -54,7 +55,7 @@ class Keyboards:
         for p in products:
             builder.row(
                 InlineKeyboardButton(
-                    text=f"{p['name']} — {p['price']:.0f} ₽",
+                    text=f"{p['name']} — {p['price']:.0f} ₽ | {p['stock']} шт.",
                     callback_data=f"product:{p['id']}",
                 )
             )
@@ -65,22 +66,36 @@ class Keyboards:
         return builder.as_markup()
 
     @staticmethod
-    def product_card(product_id: int) -> InlineKeyboardMarkup:
+    def product_card(product_id: int, stock: int = 10) -> InlineKeyboardMarkup:
         builder = InlineKeyboardBuilder()
-        builder.row(
-            InlineKeyboardButton(
-                text="➕ В корзину", callback_data=f"add:{product_id}:1"
+        if stock >= 1:
+            builder.row(
+                InlineKeyboardButton(
+                    text="➕ В корзину", callback_data=f"add:{product_id}:1"
+                )
             )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text="➕ Добавить 2 шт.", callback_data=f"add:{product_id}:2"
-            )
-        )
         builder.row(
             InlineKeyboardButton(text="◀️ Назад", callback_data="catalog"),
             InlineKeyboardButton(text="🛒 Корзина", callback_data="cart"),
         )
+        return builder.as_markup()
+
+    @staticmethod
+    def stock_products(products: list[dict]) -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        for product in products:
+            builder.button(text=f"{product['name']} — {product['stock']} шт.", callback_data=f"stock_product:{product['id']}")
+        builder.button(text="◀️ В меню", callback_data="menu")
+        builder.adjust(1)
+        return builder.as_markup()
+
+    @staticmethod
+    def stock_actions(product_id: int) -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        for delta in (-1, 1, 5, 10):
+            builder.button(text=f"{delta:+d} шт.", callback_data=f"stock_adjust:{product_id}:{delta}")
+        builder.adjust(2)
+        builder.row(InlineKeyboardButton(text="◀️ Склад", callback_data="stock"))
         return builder.as_markup()
 
     @staticmethod
@@ -126,6 +141,35 @@ class Keyboards:
         builder.row(
             InlineKeyboardButton(text="◀️ Отмена", callback_data="cart")
         )
+        return builder.as_markup()
+
+    @staticmethod
+    def payment_options() -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="При получении (по умолчанию)", callback_data="payment:cash_on_pickup")
+        builder.button(text="ЮKassa — тестовая оплата", callback_data="payment:yookassa_test")
+        builder.button(text="◀️ Отмена", callback_data="cart")
+        builder.adjust(1)
+        return builder.as_markup()
+
+    @staticmethod
+    def order_actions(order: dict) -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        if order["payment_method"] == "yookassa_test" and order["payment_status"] == "pending" and order["status"] == "new":
+            builder.button(text="Оплатить через ЮKassa (тест)", callback_data=f"pay:{order['id']}")
+        if order["status"] in {"new", "ready"}:
+            builder.button(text="Отменить заказ", callback_data=f"cancel_order:{order['id']}")
+        builder.button(text="Мои заказы", callback_data="my_orders")
+        builder.button(text="◀️ В меню", callback_data="menu")
+        builder.adjust(1)
+        return builder.as_markup()
+
+    @staticmethod
+    def cancel_order_confirmation(order_id: int) -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Да, отменить заказ", callback_data=f"cancel_confirm:{order_id}")
+        builder.button(text="Нет, вернуться к заказу", callback_data=f"order:{order_id}")
+        builder.adjust(1)
         return builder.as_markup()
 
     @staticmethod

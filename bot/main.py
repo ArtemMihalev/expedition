@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -14,6 +15,7 @@ if not BOT_TOKEN:
 from bot.database.db import Database
 from bot.handlers import setup_routers
 from bot.middlewares import DatabaseMiddleware
+from bot.ui import PROJECT_ROOT
 
 
 async def main() -> None:
@@ -26,6 +28,10 @@ async def main() -> None:
     db = Database(DATABASE_PATH)
     await db.init_db()
     logging.info("База данных инициализирована: %s", DATABASE_PATH)
+    logging.info("Expedition: карточки с фото включены; проект=%s; PID=%s", PROJECT_ROOT, os.getpid())
+    products = await db.get_stock_products()
+    image_count = sum(bool(p.get("image_path") and (PROJECT_ROOT / p["image_path"]).is_file()) for p in products)
+    logging.info("Найдено изображений товаров: %s из %s", image_count, len(products))
 
     bot = Bot(
         token=BOT_TOKEN,

@@ -1,8 +1,10 @@
+from bot.ui import show_text
 from aiogram import Router
 from aiogram.types import CallbackQuery
 
 from bot.database.db import CATEGORY_LABELS, Database
 from bot.keyboards.inline import keyboards
+from bot.ui import show_product_card
 
 router = Router()
 
@@ -14,7 +16,7 @@ async def show_catalog(callback: CallbackQuery, db: Database) -> None:
         "🛍 <b>Каталог Expedition</b>\n\n"
         "Выберите категорию или просмотрите весь ассортимент:"
     )
-    await callback.message.edit_text(
+    await show_text(callback.message,
         text, reply_markup=keyboards.catalog_categories(categories)
     )
     await callback.answer()
@@ -35,7 +37,7 @@ async def show_category(callback: CallbackQuery, db: Database) -> None:
         return
 
     text = f"📂 <b>{title}</b>\n\nВыберите товар:"
-    await callback.message.edit_text(
+    await show_text(callback.message,
         text, reply_markup=keyboards.product_list(products)
     )
     await callback.answer()
@@ -54,11 +56,10 @@ async def show_product(callback: CallbackQuery, db: Database) -> None:
         f"🏷 <b>{product['name']}</b>\n"
         f"📂 Категория: {cat_label}\n"
         f"💰 Цена: <b>{product['price']:.0f} ₽</b>\n\n"
+        f"📦 В наличии: {product['stock']} шт.\n\n"
         f"{product['description']}"
     )
-    await callback.message.edit_text(
-        text, reply_markup=keyboards.product_card(product_id)
-    )
+    await show_product_card(callback.message, product, text, keyboards.product_card(product_id, product['stock']))
     await callback.answer()
 
 
@@ -74,7 +75,7 @@ async def add_to_cart(callback: CallbackQuery, db: Database) -> None:
 
     ok = await db.add_to_cart(callback.from_user.id, product_id, quantity)
     if not ok:
-        await callback.answer("Не удалось добавить товар.", show_alert=True)
+        await callback.answer("Товар недоступен или выбранное количество превышает остаток на складе.", show_alert=True)
         return
 
     product = await db.get_product(product_id)

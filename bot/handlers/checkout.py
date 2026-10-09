@@ -1,8 +1,11 @@
+from bot.ui import show_text
+from html import escape
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import MANAGER_IDS, ORDER_STATUS_LABELS, PAYMENT_LABEL, PICKUP_OPTIONS
+from bot.config import MANAGER_IDS, ORDER_STATUS_LABELS, PAYMENT_LABEL, PAYMENT_LABELS, YOOKASSA_PROVIDER_TOKEN, PICKUP_OPTIONS
 from bot.database.db import Database
 from bot.keyboards.inline import keyboards
 from bot.states import CheckoutStates
@@ -15,13 +18,14 @@ def format_review(
     total: float,
     customer_name: str,
     pickup_key: str,
+    payment_method: str = "cash_on_pickup",
 ) -> str:
     pickup_label = PICKUP_OPTIONS.get(pickup_key, pickup_key)
     lines = [
         "📋 <b>Проверьте заказ</b>\n",
-        f"👤 Имя: <b>{customer_name}</b>",
+        f"👤 Имя: <b>{escape(customer_name)}</b>",
         f"📍 Получение: {pickup_label}",
-        f"💳 Расчёт: {PAYMENT_LABEL}\n",
+        f"💳 Расчёт: {PAYMENT_LABELS[payment_method]}\n",
         "<b>Состав:</b>",
     ]
     for item in cart:
@@ -48,7 +52,7 @@ async def checkout_start(callback: CallbackQuery, state: FSMContext, db: Databas
         return
 
     await state.set_state(CheckoutStates.waiting_name)
-    await callback.message.edit_text(
+    await show_text(callback.message,
         "✏️ Введите ваше имя или псевдоним для заказа:",
         reply_markup=keyboards.back_to_menu(),
     )
@@ -94,16 +98,38 @@ async def checkout_pickup(
         await callback.answer("Корзина пуста.", show_alert=True)
         return
 
+    await state.update_data(pickup_key=pickup_key)
+    await state.set_state(CheckoutStates.waiting_payment)
+    await show_text(callback.message, "💳 Выберите способ оплаты:", reply_markup=keyboards.payment_options())
+    await callback.answer()
+
+
+@router.callback_query(CheckoutStates.waiting_payment, F.data.startswith("payment:"))
+async def checkout_payment(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    payment_method = callback.data.split(":", 1)[1]
+    if payment_method not in PAYMENT_LABELS:
+        await callback.answer("Неверный способ оплаты.", show_alert=True)
+        return
+    if payment_method == "yookassa_test" and not YOOKASSA_PROVIDER_TOKEN:
+        await callback.answer("Тестовая ЮKassa пока не настроена. Выберите оплату при получении.", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    cart = await db.get_cart(user_id)
+    if not cart:
+        await state.clear()
+        await callback.answer("Корзина пуста.", show_alert=True)
+        return
     data = await state.get_data()
+    pickup_key = data["pickup_key"]
     customer_name = data["customer_name"]
     total = await db.get_cart_total(user_id)
     confirm_token = await db.create_checkout_token(user_id)
 
-    await state.update_data(pickup_key=pickup_key, confirm_token=confirm_token)
+    await state.update_data(pickup_key=pickup_key, confirm_token=confirm_token, payment_method=payment_method)
     await state.set_state(CheckoutStates.review)
 
-    text = format_review(cart, total, customer_name, pickup_key)
-    await callback.message.edit_text(
+    text = format_review(cart, total, customer_name, pickup_key, payment_method)
+    await show_text(callback.message,
         text, reply_markup=keyboards.confirm_order(confirm_token)
     )
     await callback.answer()
@@ -130,6 +156,7 @@ async def checkout_confirm(
         token,
         data["customer_name"],
         data["pickup_key"],
+        data.get("payment_method", "cash_on_pickup"),
     )
 
     if status == "already_confirmed":
@@ -148,6 +175,9 @@ async def checkout_confirm(
     order = await db.get_order(order_id, user_id)
     await _show_success(callback, order_id, order)
     await state.clear()
+    if order["payment_method"] == "yookassa_test":
+        from bot.handlers.payments import send_order_invoice
+        await send_order_invoice(callback.message, order)
 
 
 async def _show_success(callback: CallbackQuery, order_id: int, order: dict | None) -> None:
@@ -163,13 +193,16 @@ async def _show_success(callback: CallbackQuery, order_id: int, order: dict | No
         f"🎉 <b>Заказ №{order_id} оформлен!</b>\n\n"
         f"💰 Сумма: <b>{total:.0f} ₽</b>\n"
         f"📍 Получение: {pickup_label}\n"
-        f"💳 {PAYMENT_LABEL}\n"
+        f"💳 {PAYMENT_LABELS[order['payment_method']]}\n"
         f"📊 Статус: <b>{status_label}</b>\n\n"
-        "Мы сообщим, когда заказ будет готов к выдаче."
+        "Статус доступен в разделе «Мои заказы»."
     )
-    await callback.message.edit_text(
+    await show_text(callback.message,
         text,
-        reply_markup=keyboards.main_menu(
-            is_manager=callback.from_user.id in MANAGER_IDS
-        ),
+        reply_markup=keyboards.order_actions(order),
     )
+
+
+@router.callback_query(F.data.startswith("confirm:"))
+async def stale_confirmation(callback: CallbackQuery) -> None:
+    await callback.answer("Эта кнопка уже обработана или устарела. Проверьте «Мои заказы».", show_alert=True)

@@ -1,3 +1,4 @@
+from bot.ui import show_text
 from aiogram import Router
 from aiogram.types import CallbackQuery
 
@@ -21,6 +22,8 @@ def format_cart_text(cart: list[dict], total: float) -> str:
             f"• {item['name']}\n"
             f"  {item['quantity']} × {item['price']:.0f} ₽ = <b>{subtotal:.0f} ₽</b>"
         )
+        if not item['is_available'] or item['quantity'] > item['stock']:
+            lines.append(f"  ⚠️ Доступно на складе: {item['stock']} шт. Уменьшите количество или удалите позицию.")
     lines.append(f"\n💰 <b>Итого: {total:.0f} ₽</b>")
     return "\n".join(lines)
 
@@ -31,7 +34,7 @@ async def show_cart(callback: CallbackQuery, db: Database) -> None:
     cart = await db.get_cart(user_id)
     total = await db.get_cart_total(user_id)
     text = format_cart_text(cart, total)
-    await callback.message.edit_text(text, reply_markup=keyboards.cart(cart))
+    await show_text(callback.message, text, reply_markup=keyboards.cart(cart))
     await callback.answer()
 
 
@@ -52,7 +55,7 @@ async def cart_increase(callback: CallbackQuery, db: Database) -> None:
 
     cart = await db.get_cart(user_id)
     total = await db.get_cart_total(user_id)
-    await callback.message.edit_text(
+    await show_text(callback.message,
         format_cart_text(cart, total), reply_markup=keyboards.cart(cart)
     )
     await callback.answer()
@@ -72,11 +75,14 @@ async def cart_decrease(callback: CallbackQuery, db: Database) -> None:
     if new_qty <= 0:
         await db.remove_from_cart(user_id, product_id)
     else:
-        await db.update_cart_quantity(user_id, product_id, new_qty)
+        ok, msg = await db.update_cart_quantity(user_id, product_id, new_qty)
+        if not ok:
+            await callback.answer(msg, show_alert=True)
+            return
 
     cart = await db.get_cart(user_id)
     total = await db.get_cart_total(user_id)
-    await callback.message.edit_text(
+    await show_text(callback.message,
         format_cart_text(cart, total), reply_markup=keyboards.cart(cart)
     )
     await callback.answer()
@@ -94,7 +100,7 @@ async def cart_delete(callback: CallbackQuery, db: Database) -> None:
     await db.remove_from_cart(user_id, product_id)
     cart = await db.get_cart(user_id)
     total = await db.get_cart_total(user_id)
-    await callback.message.edit_text(
+    await show_text(callback.message,
         format_cart_text(cart, total), reply_markup=keyboards.cart(cart)
     )
     await callback.answer("Позиция удалена")
