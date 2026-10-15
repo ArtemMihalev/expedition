@@ -9,4 +9,10 @@ build/
 .idea/
 .vscode/
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 data/

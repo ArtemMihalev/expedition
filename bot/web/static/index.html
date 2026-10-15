@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#143b32">
+  <title>Expedition · Кабинет</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="#summary"><span class="brand-icon">↟</span><span>expedition<small>КАБИНЕТ МЕНЕДЖЕРА</small></span></a><span class="environment">Учебный магазин</span></header>
+  <main>
+    <div class="heading"><div><span class="eyebrow">ПОД КОНТРОЛЕМ</span><h1>Деньги в движении.</h1><p>Заказы, расходы и результат вашего магазина.</p></div><button id="refresh" class="outline">↻ Обновить</button></div>
+    <div id="error" class="banner error" role="alert" hidden></div>
+    <div id="notice" class="banner" role="status" hidden></div>
+    <nav aria-label="Разделы"><button data-tab="summary" class="active">Обзор</button><button data-tab="orders">Заказы</button><button data-tab="operations">Операции</button><button data-tab="expenses">Добавить расход</button></nav>
+    <form id="period" class="period"><label>С<input id="start" type="date" required></label><span>—</span><label>По<input id="end" type="date" required></label><button type="submit">Показать</button><small>Даты операций · Москва</small></form>
+    <section id="summary" class="tab">
+      <div class="section-title"><h2>Финансовая сводка</h2><span id="summary-period">Загрузка…</span></div>
+      <div class="hero-cards"><article class="metric primary"><span>Денежный поток</span><strong id="cash-flow">—</strong><p>Поступления − возвраты − расходы</p><span class="metric-mark">↗</span></article><article class="metric"><span>Учебный результат</span><strong id="result">—</strong><p>Поток − себестоимость продаж + себестоимость возвратов</p></article></div>
+      <div class="small-cards"><article><span>Поступления</span><strong id="receipts">—</strong></article><article><span>Возвраты</span><strong id="refunds">—</strong></article><article><span>Расходы</span><strong id="expenses-total">—</strong></article></div>
+      <article class="panel costs"><div><span class="eyebrow">СТОИМОСТЬ ТОВАРОВ</span><h2>Что осталось после продажи</h2><p>Закупочную стоимость не нужно повторно записывать в расходы.</p></div><div><span>Себестоимость оплаченных товаров</span><strong id="cost-paid">—</strong><span>Себестоимость возвращённых товаров</span><strong id="cost-returned">—</strong></div></article>
+      <p id="cost-warning" class="banner" hidden></p>
+      <p class="footnote">Учитываются только подтверждённые операции за выбранный период. Возврат старого заказа может сделать результат текущего периода отрицательным. Учебные показатели, без налогов.</p>
+    </section>
+    <section id="orders" class="tab" hidden><div class="section-title"><h2>Заказы магазина</h2><span>Последние 200 · все даты</span></div><div id="order-list" class="list"></div></section>
+    <section id="operations" class="tab" hidden><div class="section-title"><h2>Журнал операций</h2><span>До 500 записей за период</span></div><p class="footnote">Исправленные и отменённые расходы сохраняются в журнале. В сводке учитывается только действующая запись.</p><div id="operation-list" class="list"></div></section>
+    <section id="expenses" class="tab" hidden><div class="section-title"><h2 id="expense-title">Новый расход</h2></div><form id="expense-form" class="panel expense-form">
+      <p>Доставка, упаковка, реклама и другие операционные затраты. Себестоимость товаров уже учтена отдельно.</p>
+      <label>Категория<select id="category" required></select></label>
+      <div class="form-grid"><label>Сумма, ₽<input id="amount" type="number" min="0.01" step="0.01" max="10000000" placeholder="100.00" required></label><label>Дата расхода<input id="expense-date" type="date" required></label></div>
+      <label>Короткое описание<textarea id="description" maxlength="200" minlength="1" rows="3" placeholder="Доставка заказа в пункт выдачи" required></textarea></label>
+      <div class="actions"><button type="submit" id="save-expense">Сохранить расход</button><button type="button" id="reset-expense" class="outline">Очистить</button></div>
+    </form></section>
+  </main>
+  <footer>EXPEDITION <span>Хорошее путешествие начинается с порядка.</span></footer>
+  <dialog id="order-dialog"><div class="dialog-heading"><h2 id="order-title">Заказ</h2><button id="close-order" class="outline" aria-label="Закрыть">✕</button></div><div id="dialog-error" class="banner error" role="alert" hidden></div><div id="order-detail"></div></dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title">Подтвердите действие</h2><p id="confirm-text"></p><div class="actions"><button id="confirm-yes" class="danger">Подтвердить</button><button id="confirm-no" class="outline">Назад</button></div></dialog>
+</body>
+</html>

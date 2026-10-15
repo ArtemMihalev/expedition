@@ -20,11 +20,11 @@ def format_cart_text(cart: list[dict], total: float) -> str:
         subtotal = item["price"] * item["quantity"]
         lines.append(
             f"• {item['name']}\n"
-            f"  {item['quantity']} × {item['price']:.0f} ₽ = <b>{subtotal:.0f} ₽</b>"
+            f"  {item['quantity']} × {item['price']:.2f} ₽ = <b>{subtotal:.2f} ₽</b>"
         )
         if not item['is_available'] or item['quantity'] > item['stock']:
             lines.append(f"  ⚠️ Доступно на складе: {item['stock']} шт. Уменьшите количество или удалите позицию.")
-    lines.append(f"\n💰 <b>Итого: {total:.0f} ₽</b>")
+    lines.append(f"\n💰 <b>Итого: {total:.2f} ₽</b>")
     return "\n".join(lines)
 
 

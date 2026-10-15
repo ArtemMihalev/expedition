@@ -3,6 +3,7 @@ import aiosqlite
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
+from bot.database.finance import FinanceMixin
 
 from bot.config import (
     ORDER_STATUS_NEW,
@@ -70,7 +71,7 @@ PRODUCT_IMAGES = dict(zip(
 ))
 
 
-class Database:
+class Database(FinanceMixin):
     def __init__(self, db_path: str):
         self.db_path = db_path
 
@@ -182,6 +183,8 @@ class Database:
                 await conn.execute("UPDATE products SET image_path = ? WHERE name = ? AND image_path IS NULL", (image_path, name))
             await conn.commit()
 
+        await self.init_finance()
+
     async def upsert_user(
         self, user_id: int, username: str | None, first_name: str | None
     ) -> None:
@@ -280,7 +283,7 @@ class Database:
             cursor = await conn.execute(
                 """
                 SELECT ci.id AS cart_item_id, ci.quantity,
-                       p.id AS product_id, p.name, p.price, p.description, p.stock, p.is_available
+                       p.id AS product_id, p.name, p.price_kopecks / 100.0 AS price, p.price_kopecks, p.description, p.stock, p.is_available
                 FROM cart_items ci
                 JOIN products p ON p.id = ci.product_id
                 WHERE ci.user_id = ?
@@ -293,7 +296,7 @@ class Database:
 
     async def get_cart_total(self, user_id: int) -> float:
         cart = await self.get_cart(user_id)
-        return sum(item["price"] * item["quantity"] for item in cart)
+        return sum(item["price_kopecks"] * item["quantity"] for item in cart) / 100
 
     async def update_cart_quantity(
         self, user_id: int, product_id: int, quantity: int
@@ -360,7 +363,7 @@ class Database:
         payment_method: str = PAYMENT_METHOD,
     ) -> tuple[int | None, str]:
         """Атомарно переносит корзину в заказ. Защита от дубликатов по токену."""
-        if payment_method not in {PAYMENT_METHOD, "yookassa_test"}:
+        if payment_method not in {PAYMENT_METHOD, "yookassa_test", "demo"}:
             return None, "Неверный способ оплаты."
         async with self.connection() as conn:
             try:
@@ -385,7 +388,7 @@ class Database:
 
                 cursor = await conn.execute(
                     """
-                    SELECT ci.product_id, ci.quantity, p.name, p.price, p.stock, p.is_available
+                    SELECT ci.product_id, ci.quantity, p.name, p.price, p.price_kopecks, p.cost_kopecks, p.stock, p.is_available
                     FROM cart_items ci
                     JOIN products p ON p.id = ci.product_id
                     WHERE ci.user_id = ?
@@ -402,8 +405,12 @@ class Database:
                     if not item["is_available"] or item["quantity"] > item["stock"]:
                         await conn.execute("ROLLBACK")
                         return None, f"Недостаточно товара «{item['name']}»: доступно {item['stock']} шт. Измените корзину."
+                    if item['cost_kopecks'] is None:
+                        await conn.execute('ROLLBACK')
+                        return None, 'У товара не задана учебная себестоимость. Обратитесь к менеджеру.'
 
-                total = sum(r["price"] * r["quantity"] for r in cart_items)
+                total_kopecks = sum(r["price_kopecks"] * r["quantity"] for r in cart_items)
+                total = total_kopecks / 100
 
                 cursor = await conn.execute(
                     """
@@ -422,8 +429,8 @@ class Database:
                 )
                 order_id = cursor.lastrowid
                 await conn.execute(
-                    "UPDATE orders SET payment_status = ? WHERE id = ?",
-                    ("pending" if payment_method == "yookassa_test" else "unpaid", order_id),
+                    "UPDATE orders SET payment_status = ?, total_kopecks = ? WHERE id = ?",
+                    ("pending" if payment_method in {"yookassa_test", "demo"} else "unpaid", total_kopecks, order_id),
                 )
 
                 for item in cart_items:
@@ -431,10 +438,10 @@ class Database:
                     await conn.execute(
                         """
                         INSERT INTO order_items
-                            (order_id, product_name, product_price, quantity, product_id)
-                        VALUES (?, ?, ?, ?, ?)
+                            (order_id, product_name, product_price, quantity, product_id, price_kopecks, cost_kopecks)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (order_id, item["name"], item["price"], item["quantity"], item["product_id"]),
+                        (order_id, item["name"], item["price_kopecks"] / 100, item["quantity"], item["product_id"], item["price_kopecks"], item["cost_kopecks"]),
                     )
 
                 await conn.execute("UPDATE orders SET stock_deducted = 1 WHERE id = ?", (order_id,))
@@ -448,6 +455,7 @@ class Database:
                     """,
                     (order_id, confirm_token),
                 )
+                await self.create_pending_payment(conn, order_id, total_kopecks, payment_method)
                 await conn.execute("COMMIT")
                 return order_id, "ok"
 
@@ -530,7 +538,7 @@ class Database:
                 return False
             if not order or order["status"] == status or order["status"] in {"completed", "cancelled"}:
                 return False
-            if order["payment_method"] == "yookassa_test" and order["payment_status"] != "paid" and status != "cancelled":
+            if order["payment_method"] in {"yookassa_test", "demo"} and order["payment_status"] != "paid" and status != "cancelled":
                 return False
             if status == "cancelled" and order["stock_deducted"]:
                 items = await (await conn.execute("SELECT product_id, quantity FROM order_items WHERE order_id = ?", (order_id,))).fetchall()
@@ -538,6 +546,9 @@ class Database:
                     if item["product_id"] is not None:
                         await conn.execute("UPDATE products SET stock = stock + ? WHERE id = ?", (item["quantity"], item["product_id"]))
                 await conn.execute("UPDATE orders SET stock_deducted = 0 WHERE id = ?", (order_id,))
+            if status == 'cancelled' and order['payment_status'] == 'pending':
+                await conn.execute("UPDATE payments SET status='canceled',confirmed_at=datetime('now') WHERE order_id=? AND status='pending'", (order_id,))
+                await conn.execute("UPDATE orders SET payment_status='canceled' WHERE id=?", (order_id,))
             await conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
             await conn.commit()
             return True
@@ -557,7 +568,7 @@ class Database:
 
     @staticmethod
     def amount_kopecks(order: dict) -> int:
-        return int((Decimal(str(order["total"])) * 100).quantize(Decimal("1")))
+        return order["total_kopecks"] if order.get("total_kopecks") is not None else int((Decimal(str(order["total"])) * 100).quantize(Decimal("1")))
 
     async def validate_payment(self, order_id: int, user_id: int, currency: str, amount: int) -> bool:
         order = await self.get_order(order_id, user_id)
@@ -576,18 +587,7 @@ class Database:
             if not row:
                 return False
             order = dict(row)
-            if order["payment_method"] != "yookassa_test" or currency != "RUB" or amount != self.amount_kopecks(order):
-                return False
-            if order["payment_status"] == "paid":
-                return (order["telegram_payment_charge_id"] == telegram_charge
-                        and order["provider_payment_charge_id"] == provider_charge)
-            existing = await (await conn.execute("SELECT id FROM orders WHERE telegram_payment_charge_id = ?",
-                                                (telegram_charge,))).fetchone()
-            if existing:
-                return False
-            # Успешный платёж фиксируется даже если менеджер успел изменить статус заказа.
-            await conn.execute("""UPDATE orders SET payment_status = 'paid',
-                telegram_payment_charge_id = ?, provider_payment_charge_id = ?, paid_at = datetime('now')
-                WHERE id = ?""", (telegram_charge, provider_charge, order_id))
-            await conn.commit()
-            return True
+            valid = await self._confirm_payment(conn, order, currency, amount, telegram_charge, provider_charge, 'yookassa_test')
+            if valid:
+                await conn.commit()
+            return valid

@@ -55,7 +55,7 @@ async def show_product(callback: CallbackQuery, db: Database) -> None:
     text = (
         f"🏷 <b>{product['name']}</b>\n"
         f"📂 Категория: {cat_label}\n"
-        f"💰 Цена: <b>{product['price']:.0f} ₽</b>\n\n"
+        f"💰 Цена: <b>{product['price']:.2f} ₽</b>\n\n"
         f"📦 В наличии: {product['stock']} шт.\n\n"
         f"{product['description']}"
     )

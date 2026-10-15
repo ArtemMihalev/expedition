@@ -1,7 +1,7 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.config import ORDER_STATUS_LABELS, PICKUP_OPTIONS
+from bot.config import ORDER_STATUS_LABELS, PICKUP_OPTIONS, MINI_APP_URL, DEMO_PAYMENTS_ENABLED
 
 
 class Keyboards:
@@ -22,6 +22,10 @@ class Keyboards:
                 )
             )
             builder.row(InlineKeyboardButton(text="📦 Склад", callback_data="stock"))
+            if MINI_APP_URL.startswith('https://'):
+                builder.row(InlineKeyboardButton(text="📊 Финансовый кабинет", web_app=WebAppInfo(url=MINI_APP_URL)))
+            else:
+                builder.row(InlineKeyboardButton(text="📊 Финансовый кабинет", callback_data="finance_help"))
         return builder.as_markup()
 
     @staticmethod
@@ -55,7 +59,7 @@ class Keyboards:
         for p in products:
             builder.row(
                 InlineKeyboardButton(
-                    text=f"{p['name']} — {p['price']:.0f} ₽ | {p['stock']} шт.",
+                    text=f"{p['name']} — {p['price']:.2f} ₽ | {p['stock']} шт.",
                     callback_data=f"product:{p['id']}",
                 )
             )
@@ -148,6 +152,8 @@ class Keyboards:
         builder = InlineKeyboardBuilder()
         builder.button(text="При получении (по умолчанию)", callback_data="payment:cash_on_pickup")
         builder.button(text="ЮKassa — тестовая оплата", callback_data="payment:yookassa_test")
+        if DEMO_PAYMENTS_ENABLED:
+            builder.button(text="Демонстрация без платёжного провайдера", callback_data="payment:demo")
         builder.button(text="◀️ Отмена", callback_data="cart")
         builder.adjust(1)
         return builder.as_markup()
@@ -157,11 +163,23 @@ class Keyboards:
         builder = InlineKeyboardBuilder()
         if order["payment_method"] == "yookassa_test" and order["payment_status"] == "pending" and order["status"] == "new":
             builder.button(text="Оплатить через ЮKassa (тест)", callback_data=f"pay:{order['id']}")
+        if DEMO_PAYMENTS_ENABLED and order['payment_method'] == 'demo' and order['payment_status'] == 'pending' and order['status'] == 'new':
+            builder.button(text="Демо: успешный платёж", callback_data=f"demo_pay:{order['id']}:succeeded")
+            builder.button(text="Демо: отменить платёж", callback_data=f"demo_pay:{order['id']}:canceled")
         if order["status"] in {"new", "ready"}:
             builder.button(text="Отменить заказ", callback_data=f"cancel_order:{order['id']}")
         builder.button(text="Мои заказы", callback_data="my_orders")
         builder.button(text="◀️ В меню", callback_data="menu")
         builder.adjust(1)
+        return builder.as_markup()
+
+    @staticmethod
+    def finance_cabinet() -> InlineKeyboardMarkup:
+        builder = InlineKeyboardBuilder()
+        if MINI_APP_URL.startswith('https://'):
+            builder.button(text="Открыть финансовый кабинет", web_app=WebAppInfo(url=MINI_APP_URL))
+        else:
+            builder.button(text="Настроить финансовый кабинет", callback_data="finance_help")
         return builder.as_markup()
 
     @staticmethod
@@ -192,7 +210,7 @@ class Keyboards:
         for order in orders[:10]:
             builder.row(
                 InlineKeyboardButton(
-                    text=f"Заказ №{order['id']} — {order['total']:.0f} ₽",
+                    text=f"Заказ №{order['id']} — {order['total']:.2f} ₽",
                     callback_data=f"order:{order['id']}",
                 )
             )
@@ -208,7 +226,7 @@ class Keyboards:
             name = order.get("customer_name", "—")
             builder.row(
                 InlineKeyboardButton(
-                    text=f"№{order['id']} | {name} | {order['total']:.0f} ₽",
+                    text=f"№{order['id']} | {name} | {order['total']:.2f} ₽",
                     callback_data=f"mgr_order:{order['id']}",
                 )
             )

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from contextlib import suppress
+from aiohttp import web
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -8,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.config import BOT_TOKEN, DATABASE_PATH
+from bot.config import BOT_TOKEN, DATABASE_PATH, WEB_HOST, WEB_PORT
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан. Создайте файл .env на основе .env.example")
@@ -16,6 +18,8 @@ from bot.database.db import Database
 from bot.handlers import setup_routers
 from bot.middlewares import DatabaseMiddleware
 from bot.ui import PROJECT_ROOT
+from bot.web.server import create_app
+from bot.handlers.finance import notification_worker
 
 
 async def main() -> None:
@@ -41,8 +45,22 @@ async def main() -> None:
     dp.update.middleware(DatabaseMiddleware(db))
     dp.include_router(setup_routers())
 
-    logging.info("Бот Expedition запущен")
-    await dp.start_polling(bot)
+    runner = web.AppRunner(create_app(db), access_log=None)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
+        logging.info("Mini App: http://%s:%s", WEB_HOST, WEB_PORT)
+        notifications = asyncio.create_task(notification_worker(bot, db))
+        try:
+            logging.info("Бот Expedition запущен")
+            await dp.start_polling(bot, close_bot_session=False)
+        finally:
+            notifications.cancel()
+            with suppress(asyncio.CancelledError):
+                await notifications
+    finally:
+        await runner.cleanup()
+        await bot.session.close()
 
 
 if __name__ == "__main__":

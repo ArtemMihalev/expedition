@@ -3,7 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / '.env')
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -13,6 +14,8 @@ MANAGER_IDS: set[int] = {
 }
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/shop.db")
+if not Path(DATABASE_PATH).is_absolute():
+    DATABASE_PATH = str(PROJECT_ROOT / DATABASE_PATH)
 
 # Статусы заказа
 ORDER_STATUS_NEW = "new"
@@ -42,9 +45,22 @@ if YOOKASSA_PROVIDER_TOKEN and ":TEST:" not in YOOKASSA_PROVIDER_TOKEN:
 PAYMENT_LABELS = {
     PAYMENT_METHOD: PAYMENT_LABEL,
     "yookassa_test": "ЮKassa — тестовая оплата",
+    "demo": "Демонстрация без платёжного провайдера",
 }
 PAYMENT_STATUS_LABELS = {
     "unpaid": "При получении",
     "pending": "Ожидает тестовой оплаты",
     "paid": "Оплачено (тестовый платёж)",
+    "refunded": "Полный возврат подтверждён",
+    "canceled": "Учебный платёж отменён",
 }
+
+MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip().rstrip("/")
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
+INIT_DATA_TTL = int(os.getenv("INIT_DATA_TTL", "3600"))
+DEMO_PAYMENTS_ENABLED = os.getenv("DEMO_PAYMENTS_ENABLED", "true").lower() == "true"
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+if YOOKASSA_SECRET_KEY and not YOOKASSA_SECRET_KEY.startswith("test_"):
+    raise ValueError("Допускается только секретный ключ тестового магазина ЮKassa (test_).")

@@ -14,6 +14,10 @@ router = Router()
 def format_order(order: dict) -> str:
     pickup_label = PICKUP_OPTIONS.get(order["pickup_method"], order["pickup_method"])
     status_label = ORDER_STATUS_LABELS.get(order["status"], order["status"])
+    if order['payment_status'] == 'pending' and order['status'] == 'new':
+        status_label = 'Ожидает оплаты'
+    elif order['payment_status'] == 'paid' and order['status'] == 'new':
+        status_label = 'Оплачен'
     lines = [
         f"📦 <b>Заказ №{order['id']}</b>\n",
         f"📅 Дата: {order['created_at']}",
@@ -28,9 +32,9 @@ def format_order(order: dict) -> str:
         subtotal = item["product_price"] * item["quantity"]
         lines.append(
             f"• {item['product_name']} — {item['quantity']} × "
-            f"{item['product_price']:.0f} ₽ = {subtotal:.0f} ₽"
+            f"{item['product_price']:.2f} ₽ = {subtotal:.2f} ₽"
         )
-    lines.append(f"\n💰 <b>Итого: {order['total']:.0f} ₽</b>")
+    lines.append(f"\n💰 <b>Итого: {order['total']:.2f} ₽</b>")
     return "\n".join(lines)
 
 

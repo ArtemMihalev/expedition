@@ -5,7 +5,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import MANAGER_IDS, ORDER_STATUS_LABELS, PAYMENT_LABEL, PAYMENT_LABELS, YOOKASSA_PROVIDER_TOKEN, PICKUP_OPTIONS
+from bot.config import MANAGER_IDS, ORDER_STATUS_LABELS, PAYMENT_LABEL, PAYMENT_LABELS, YOOKASSA_PROVIDER_TOKEN, PICKUP_OPTIONS, DEMO_PAYMENTS_ENABLED
 from bot.database.db import Database
 from bot.keyboards.inline import keyboards
 from bot.states import CheckoutStates
@@ -31,10 +31,10 @@ def format_review(
     for item in cart:
         subtotal = item["price"] * item["quantity"]
         lines.append(
-            f"• {item['name']} — {item['quantity']} × {item['price']:.0f} ₽ "
-            f"= {subtotal:.0f} ₽"
+            f"• {item['name']} — {item['quantity']} × {item['price']:.2f} ₽ "
+            f"= {subtotal:.2f} ₽"
         )
-    lines.append(f"\n💰 <b>Итого: {total:.0f} ₽</b>")
+    lines.append(f"\n💰 <b>Итого: {total:.2f} ₽</b>")
     lines.append(
         "\nНажмите «Подтвердить заказ», чтобы оформить покупку."
     )
@@ -109,6 +109,9 @@ async def checkout_payment(callback: CallbackQuery, state: FSMContext, db: Datab
     payment_method = callback.data.split(":", 1)[1]
     if payment_method not in PAYMENT_LABELS:
         await callback.answer("Неверный способ оплаты.", show_alert=True)
+        return
+    if payment_method == 'demo' and not DEMO_PAYMENTS_ENABLED:
+        await callback.answer('Учебный имитатор выключен.', show_alert=True)
         return
     if payment_method == "yookassa_test" and not YOOKASSA_PROVIDER_TOKEN:
         await callback.answer("Тестовая ЮKassa пока не настроена. Выберите оплату при получении.", show_alert=True)
@@ -188,10 +191,12 @@ async def _show_success(callback: CallbackQuery, order_id: int, order: dict | No
         order["status"] if order else "new", "Новый"
     )
     total = order["total"] if order else 0
+    if order and order['payment_status'] == 'pending':
+        status_label = 'Ожидает оплаты'
 
     text = (
         f"🎉 <b>Заказ №{order_id} оформлен!</b>\n\n"
-        f"💰 Сумма: <b>{total:.0f} ₽</b>\n"
+        f"💰 Сумма: <b>{total:.2f} ₽</b>\n"
         f"📍 Получение: {pickup_label}\n"
         f"💳 {PAYMENT_LABELS[order['payment_method']]}\n"
         f"📊 Статус: <b>{status_label}</b>\n\n"

@@ -71,4 +71,5 @@ async def successful_payment(message: Message, db: Database) -> None:
         await message.answer("Платёж получен, но не сопоставлен с заказом. Обратитесь к менеджеру.")
         return
     order = await db.get_order(order_id, message.from_user.id)
-    await message.answer(f"✅ Заказ №{order_id}: оплачено (тестовый платёж).", reply_markup=keyboards.order_actions(order))
+    from bot.handlers.orders import format_order
+    await message.answer(format_order(order), reply_markup=keyboards.order_actions(order))
