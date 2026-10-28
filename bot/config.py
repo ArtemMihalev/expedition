@@ -64,3 +64,8 @@ YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
 if YOOKASSA_SECRET_KEY and not YOOKASSA_SECRET_KEY.startswith("test_"):
     raise ValueError("Допускается только секретный ключ тестового магазина ЮKassa (test_).")
+
+RESERVE_SECONDS = int(os.getenv('RESERVE_SECONDS', '120'))
+if not 1 <= RESERVE_SECONDS <= 86400:
+    raise ValueError('RESERVE_SECONDS должен быть от 1 до 86400.')
+PAYMENT_STATUS_LABELS['refund_pending'] = 'Резерв закончился, оформляется возврат'

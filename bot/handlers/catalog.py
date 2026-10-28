@@ -56,7 +56,7 @@ async def show_product(callback: CallbackQuery, db: Database) -> None:
         f"🏷 <b>{product['name']}</b>\n"
         f"📂 Категория: {cat_label}\n"
         f"💰 Цена: <b>{product['price']:.2f} ₽</b>\n\n"
-        f"📦 В наличии: {product['stock']} шт.\n\n"
+        f"📦 На складе: {product['on_hand']} · В резерве: {product['reserved']} · Доступно: {product['available']} шт.\n\n"
         f"{product['description']}"
     )
     await show_product_card(callback.message, product, text, keyboards.product_card(product_id, product['stock']))

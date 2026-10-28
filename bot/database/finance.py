@@ -117,8 +117,9 @@ class FinanceMixin:
         duplicate = await (await conn.execute("SELECT id FROM payments WHERE provider_payment_id=? OR telegram_charge_id=?", (provider_charge, telegram_charge))).fetchone()
         if duplicate:
             return False
-        payment = await (await conn.execute("SELECT * FROM payments WHERE order_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1", (order['id'],))).fetchone()
-        timestamp = confirmed_at or now()
+        payment = await (await conn.execute("SELECT * FROM payments WHERE order_id=? AND status IN ('pending','canceled') ORDER BY created_at DESC LIMIT 1", (order['id'],))).fetchone()
+        accepted = True if confirmed_at else await self._transition_reservation(conn, order['id'], 'consumed')
+        timestamp = confirmed_at or self.timestamp()
         payment_id = payment['id'] if payment else str(uuid.uuid4())
         if payment:
             await conn.execute("UPDATE payments SET status='succeeded', provider_payment_id=?, telegram_charge_id=?, confirmed_at=? WHERE id=?", (provider_charge, telegram_charge, timestamp, payment_id))
@@ -126,11 +127,19 @@ class FinanceMixin:
             await conn.execute("INSERT INTO payments VALUES(?,?,?,?,?,?,?,'succeeded',?,?)", (payment_id, order['id'], provider, provider_charge, telegram_charge, amount, currency, timestamp, timestamp))
         await conn.execute("UPDATE orders SET payment_status='paid', telegram_payment_charge_id=?, provider_payment_charge_id=?, paid_at=? WHERE id=?", (telegram_charge, provider_charge, timestamp, order['id']))
         items = await (await conn.execute("SELECT cost_kopecks, quantity FROM order_items WHERE order_id=?", (order['id'],))).fetchall()
-        cost = None if any(i['cost_kopecks'] is None for i in items) else sum(i['cost_kopecks'] * i['quantity'] for i in items)
+        cost = (None if any(i['cost_kopecks'] is None for i in items) else sum(i['cost_kopecks'] * i['quantity'] for i in items)) if accepted else 0
         cursor = await conn.execute("""INSERT INTO finance_operations(type,amount_kopecks,occurred_at,created_at,order_id,external_event_id,author_id,description,cost_kopecks)
-            VALUES('receipt',?,?,?,?,?,?,?,?)""", (amount, timestamp, now(), order['id'], 'payment:' + provider_charge, order['user_id'], 'Подтверждённая учебная оплата', cost))
+            VALUES('receipt',?,?,?,?,?,?,?,?)""", (amount, timestamp, now(), order['id'], 'payment:' + provider_charge, order['user_id'], 'Подтверждённая учебная оплата' if accepted else 'Поздняя оплата: временное поступление до денежного возврата; продажи нет', cost))
         for manager_id in MANAGER_IDS if confirmed_at is None else ():
             await conn.execute("INSERT INTO finance_notifications(operation_id,manager_id) VALUES(?,?)", (cursor.lastrowid, manager_id))
+        if not accepted:
+            reason = 'Резерв закончился или отменён; оформляется возврат'
+            await conn.execute("UPDATE orders SET payment_status='refund_pending',conflict_reason=? WHERE id=?", (reason, order['id']))
+            rid = str(uuid.uuid4())
+            await conn.execute("""INSERT INTO refunds(id,order_id,payment_id,amount_kopecks,status,author_id,created_at,attempt_key,reason)
+                VALUES(?,?,?,?,'refund_pending',?,?,?,'late')""", (rid,order['id'],payment_id,amount,order['user_id'],timestamp,rid))
+        if not accepted:
+            self.training_crash('before_late_commit')
         return True
 
     async def create_pending_payment(self, conn, order_id, amount, provider):
@@ -142,19 +151,26 @@ class FinanceMixin:
         if outcome not in {'succeeded', 'canceled'}:
             raise ValueError('Неверное состояние платежа.')
         async with self.connection() as conn:
-            await conn.execute('BEGIN IMMEDIATE')
+            await self.begin(conn)
             row = await (await conn.execute('SELECT * FROM orders WHERE id=? AND user_id=?', (order_id, user_id))).fetchone()
-            if not row or row['payment_method'] != 'demo' or row['status'] != 'new':
+            if not row or row['payment_method'] != 'demo':
                 raise ValueError('Учебный платёж недоступен.')
             payment = await (await conn.execute("SELECT * FROM payments WHERE order_id=? ORDER BY created_at DESC LIMIT 1", (order_id,))).fetchone()
-            if not payment or payment['status'] != 'pending':
-                raise ValueError('Платёж уже завершён.')
+            if not payment:
+                raise ValueError('Платёж недоступен.')
+            if payment['status'] == 'succeeded':
+                return
+            if payment['status'] == 'canceled' and outcome == 'canceled':
+                return
             if outcome == 'canceled':
                 await conn.execute("UPDATE payments SET status='canceled',confirmed_at=? WHERE id=?", (now(), payment['id']))
                 await conn.execute("UPDATE orders SET payment_status='canceled' WHERE id=?", (order_id,))
+                await self._transition_reservation(conn,order_id,'cancelled')
             else:
                 await self._confirm_payment(conn, dict(row), 'RUB', row['total_kopecks'], 'demo-tg:' + payment['id'], 'demo:' + payment['id'], 'demo')
             await conn.commit()
+            if outcome == 'succeeded':
+                self.training_crash('after_late_commit')
 
     async def summary(self, start, end):
         low, high = period_bounds(start, end)
@@ -171,9 +187,11 @@ class FinanceMixin:
                     cost_paid += op['cost_kopecks']
                 else:
                     cost_returned += op['cost_kopecks']
+        async with self.connection() as conn:
+            pending_late = (await (await conn.execute("SELECT COALESCE(SUM(amount_kopecks),0) FROM refunds WHERE reason='late' AND status!='refund_succeeded'")).fetchone())[0]
         cash = totals['receipt'] - totals['refund'] - totals['expense']
         return dict(start=start, end=end, timezone='Europe/Moscow', currency='RUB', receipts=totals['receipt'], refunds=totals['refund'], expenses=totals['expense'], cost_paid=cost_paid, cost_returned=cost_returned, cash_flow=cash,
-                    result=None if unknown else cash - cost_paid + cost_returned, unknown_cost_operations=unknown)
+                    pending_late_refunds=pending_late, result=None if unknown else cash - cost_paid + cost_returned, unknown_cost_operations=unknown)
 
     async def finance_orders(self):
         async with self.connection() as conn:
@@ -210,7 +228,7 @@ class FinanceMixin:
         except (ValueError, TypeError, AttributeError):
             raise ValueError('Некорректный идентификатор запроса.') from None
         async with self.connection() as conn:
-            await conn.execute('BEGIN IMMEDIATE')
+            await self.begin(conn)
             previous = await (await conn.execute('SELECT * FROM finance_operations WHERE request_id=?', (request_id,))).fetchone()
             if previous:
                 if (previous['amount_kopecks'], previous['category'], previous['description'], previous['occurred_at'], previous['author_id'], previous['replacement_of']) != (amount, category, description.strip(), occurred, author_id, replace_id):
@@ -233,23 +251,23 @@ class FinanceMixin:
 
     async def cancel_expense(self, operation_id, author_id):
         async with self.connection() as conn:
-            await conn.execute('BEGIN IMMEDIATE')
+            await self.begin(conn)
             await self._cancel_expense(conn, operation_id, author_id)
             await conn.commit()
 
     async def start_refund(self, order_id, author_id):
         async with self.connection() as conn:
-            await conn.execute('BEGIN IMMEDIATE')
+            await self.begin(conn)
             order = await (await conn.execute('SELECT * FROM orders WHERE id=?', (order_id,))).fetchone()
             payment = await (await conn.execute("SELECT * FROM payments WHERE order_id=? AND status='succeeded'", (order_id,))).fetchone()
-            if not order or order['payment_status'] != 'paid' or not payment:
+            if not order or order['payment_status'] not in {'paid','refund_pending'} or not payment:
                 raise ValueError('Возврат возможен только после успешной оплаты.')
             refund = await (await conn.execute('SELECT * FROM refunds WHERE order_id=?', (order_id,))).fetchone()
             if refund:
                 if refund['status'] == 'refund_succeeded':
                     raise ValueError('Полный возврат уже проведён.')
                 if refund['status'] == 'refund_failed':
-                    await conn.execute("UPDATE refunds SET status='refund_pending',error=NULL,provider_refund_id=NULL,attempt_key=? WHERE id=?", (str(uuid.uuid4()), refund['id']))
+                    await conn.execute("UPDATE refunds SET status='refund_pending',error=NULL,next_attempt_at=NULL WHERE id=?", (refund['id'],))
                 refund_id = refund['id']
             else:
                 refund_id = str(uuid.uuid4())
@@ -272,7 +290,7 @@ class FinanceMixin:
 
     async def complete_refund(self, refund_id, external_id, amount, currency, confirmed_at=None):
         async with self.connection() as conn:
-            await conn.execute('BEGIN IMMEDIATE')
+            await self.begin(conn)
             refund = await (await conn.execute('SELECT * FROM refunds WHERE id=?', (refund_id,))).fetchone()
             if not refund or currency != 'RUB' or type(amount) is not int or amount != refund['amount_kopecks']:
                 raise ValueError('Сумма или валюта возврата не совпадает.')
@@ -284,13 +302,14 @@ class FinanceMixin:
             receipt = await (await conn.execute("SELECT * FROM finance_operations WHERE order_id=? AND type='receipt'", (refund['order_id'],))).fetchone()
             await conn.execute("UPDATE refunds SET status='refund_succeeded',provider_refund_id=?,confirmed_at=?,error=NULL WHERE id=?", (external_id, timestamp, refund_id))
             await conn.execute("""INSERT INTO finance_operations(type,amount_kopecks,occurred_at,created_at,order_id,external_event_id,author_id,description,cost_kopecks)
-                VALUES('refund',?,?,?,?,?,?,?,?)""", (amount, timestamp, now(), refund['order_id'], 'refund:' + external_id, refund['author_id'], 'Подтверждённый полный возврат', receipt['cost_kopecks']))
+                VALUES('refund',?,?,?,?,?,?,?,?)""", (amount, timestamp, now(), refund['order_id'], 'refund:' + external_id, refund['author_id'], 'Денежный возврат поздней оплаты' if refund['reason']=='late' else 'Подтверждённый полный возврат', receipt['cost_kopecks']))
             order = await (await conn.execute('SELECT * FROM orders WHERE id=?', (refund['order_id'],))).fetchone()
-            if order['stock_deducted']:
+            if refund['reason'] != 'late' and order['stock_deducted']:
                 items = await (await conn.execute('SELECT product_id,quantity FROM order_items WHERE order_id=?', (order['id'],))).fetchall()
                 for item in items:
                     if item['product_id'] is not None:
                         await conn.execute('UPDATE products SET stock=stock+? WHERE id=?', (item['quantity'], item['product_id']))
+                        await self.movement(conn,item['product_id'],'sale_return',item['quantity'],0,order['id'],refund['author_id'],f"return:{refund_id}")
             await conn.execute("UPDATE orders SET payment_status='refunded',status='cancelled',stock_deducted=0 WHERE id=?", (refund['order_id'],))
             await conn.commit()
             return True

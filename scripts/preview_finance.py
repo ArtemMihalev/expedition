@@ -22,6 +22,8 @@ async def main():
     with tempfile.TemporaryDirectory() as directory:
         db = Database(str(Path(directory) / 'ui-test.db'))
         await db.init_db()
+        for pid in range(1,7):
+            await db.receive_stock(pid,10,999,f"fixture:{pid}")
         await db.upsert_user(101, None, 'Учебный покупатель')
         for product_id in (1, 2):
             await db.add_to_cart(101, product_id)

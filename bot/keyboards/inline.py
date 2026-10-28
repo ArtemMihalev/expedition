@@ -166,8 +166,9 @@ class Keyboards:
         if DEMO_PAYMENTS_ENABLED and order['payment_method'] == 'demo' and order['payment_status'] == 'pending' and order['status'] == 'new':
             builder.button(text="Демо: успешный платёж", callback_data=f"demo_pay:{order['id']}:succeeded")
             builder.button(text="Демо: отменить платёж", callback_data=f"demo_pay:{order['id']}:canceled")
-        if order["status"] in {"new", "ready"}:
+        if order["status"] in {"new", "ready"} and order["payment_status"] not in {"paid","refund_pending","refunded"}:
             builder.button(text="Отменить заказ", callback_data=f"cancel_order:{order['id']}")
+        builder.button(text="Обновить заказ", callback_data=f"order:{order['id']}")
         builder.button(text="Мои заказы", callback_data="my_orders")
         builder.button(text="◀️ В меню", callback_data="menu")
         builder.adjust(1)

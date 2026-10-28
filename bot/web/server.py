@@ -1,4 +1,7 @@
 import logging
+import asyncio
+from contextlib import suppress
+from bot.inventory_worker import inventory_worker, process_refund, set_demo_fault
 from datetime import datetime
 from pathlib import Path
 
@@ -25,7 +28,7 @@ async def security(request, handler):
             authorization = request.headers.get('Authorization', '')
             if not authorization.startswith('tma '):
                 raise PermissionError('Откройте Mini App из Telegram под аккаунтом менеджера.')
-            request['manager_id'] = validate_init_data(authorization[4:], request.app[BOT_TOKEN_KEY], request.app[MANAGERS], request.app[AUTH_TTL])
+            request['manager_id'] = validate_init_data(authorization[4:], request.app[BOT_TOKEN_KEY], None if request.path.startswith('/api/shop/') else request.app[MANAGERS], request.app[AUTH_TTL])
         response = await handler(request)
     except PermissionError as exc:
         response = web.json_response({'error': str(exc)}, status=403)
@@ -101,7 +104,7 @@ async def start_refund(request):
     try:
         result = await db.start_refund(int(request.match_info['id']), request['manager_id'])
         if result['provider'] == 'yookassa_test':
-            result = await request.app[REFUND_SERVICE].process(db, result['id'])
+            result = await process_refund(db, result['id'], request.app[REFUND_SERVICE])
         return web.json_response(result)
     except ValueError as exc:
         return web.json_response({'error': str(exc)}, status=400)
@@ -113,7 +116,7 @@ async def check_refund(request):
     try:
         refund = await db.refund_detail(refund_id)
         if refund['provider'] == 'yookassa_test':
-            refund = await request.app[REFUND_SERVICE].process(db, refund_id)
+            refund = await process_refund(db, refund_id, request.app[REFUND_SERVICE])
         return web.json_response(refund)
     except ValueError as exc:
         return web.json_response({'error': str(exc)}, status=400)
@@ -127,25 +130,91 @@ async def demo_refund(request):
     refund = await db.refund_detail(request.match_info['id'])
     if refund['provider'] != 'demo' or refund['status'] != 'refund_pending':
         raise PermissionError('Демонстрационный возврат недоступен.')
-    if data.get('outcome') == 'succeeded':
-        await db.complete_refund(refund['id'], 'demo-refund:' + refund['id'], refund['amount_kopecks'], 'RUB')
-    elif data.get('outcome') == 'canceled':
-        async with db.connection() as conn:
-            await conn.execute("UPDATE refunds SET status='refund_failed',error='Учебная ошибка возврата' WHERE id=? AND status='refund_pending'", (refund['id'],))
-            await conn.commit()
-    else:
-        raise ValueError
-    return web.json_response(await db.refund_detail(refund['id']))
+    if data.get('outcome') == 'canceled':
+        if not db.training:
+            raise PermissionError('Имитация ошибок только на учебном стенде.')
+        await set_demo_fault(db,refund['id'],'temporary')
+    elif data.get('outcome') != 'succeeded':
+        raise ValueError('Неверное действие.')
+    return await business(process_refund(db,refund['id'],request.app[REFUND_SERVICE]))
+
+
+async def inventory(request):
+    return web.json_response(await request.app[DB].inventory_view())
+
+
+async def receive(request):
+    data=await body(request)
+    return await business(request.app[DB].receive_stock(data.get('product_id'),data.get('quantity'),request['manager_id'],data.get('request_id')))
+
+
+async def shop_order(request):
+    db=request.app[DB]
+    if request.method == 'GET':
+        value=await db.get_order(int(request.match_info['id']),request['manager_id'])
+        if value is None:
+            raise web.HTTPNotFound()
+        return web.json_response(value)
+    if 'id' in request.match_info:
+        return web.json_response(await db.update_order_status(int(request.match_info['id']),'cancelled',user_id=request['manager_id']))
+    data=await body(request)
+    if set(data)-{'request_id','items','customer_name','pickup_method','payment_method'}:
+        raise ValueError('Сумму и срок определяет сервер.')
+    method=data.get('payment_method','demo')
+    if method=='demo' and not DEMO_PAYMENTS_ENABLED:
+        raise PermissionError('Имитатор выключен.')
+    await db.upsert_user(request['manager_id'],None,'Учебный покупатель')
+    return await business(db.place_order(request['manager_id'],data.get('request_id'),data.get('items'),data.get('customer_name','Покупатель'),data.get('pickup_method','store'),method))
+
+
+async def training_payment(request):
+    db=request.app[DB]
+    if not db.training:
+        raise web.HTTPNotFound()
+    data=await body(request)
+    order=await db.get_order(int(request.match_info['id']))
+    if not order:
+        raise ValueError('Заказ не найден.')
+    return await business(db.demo_payment(order['id'],order['user_id'],data.get('outcome','succeeded')))
+
+
+async def training_fault(request):
+    db=request.app[DB]
+    if not db.training:
+        raise web.HTTPNotFound()
+    data=await body(request)
+    return await business(set_demo_fault(db,request.match_info['id'],data.get('mode')))
+
+
+async def background(app):
+    await app[DB].expire_reservations()
+    task=asyncio.create_task(inventory_worker(app[DB],app[REFUND_SERVICE]))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def metadata(request):
     return web.json_response({'categories': CATEGORIES, 'demo_enabled': DEMO_PAYMENTS_ENABLED, 'manager_id': request['manager_id']})
 
 
-def create_app(db, bot_token=BOT_TOKEN, managers=None, auth_ttl=INIT_DATA_TTL, refund_service=None):
+def create_app(db, bot_token=BOT_TOKEN, managers=None, auth_ttl=INIT_DATA_TTL, refund_service=None, workers=True):
     app = web.Application(middlewares=[security], client_max_size=32768)
     app[DB], app[BOT_TOKEN_KEY], app[MANAGERS], app[AUTH_TTL] = db, bot_token, MANAGER_IDS if managers is None else managers, auth_ttl
     app[REFUND_SERVICE] = refund_service or YooKassaRefunds()
+    if workers:
+        app.cleanup_ctx.append(background)
+    app.router.add_get('/api/inventory',inventory)
+    app.router.add_post('/api/inventory/receipts',receive)
+    app.router.add_post('/api/shop/orders',shop_order)
+    app.router.add_get('/api/shop/orders/{id:\\d+}',shop_order)
+    app.router.add_post('/api/shop/orders/{id:\\d+}/cancel',shop_order)
+    if db.training:
+        app.router.add_post('/api/training/orders/{id:\\d+}/payment',training_payment)
+        app.router.add_post('/api/training/refunds/{id}/fault',training_fault)
     app.router.add_get('/', index)
     app.router.add_get('/api/meta', metadata)
     app.router.add_get('/api/summary', summary)

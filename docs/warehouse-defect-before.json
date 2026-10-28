@@ -1,0 +1,21 @@
+{
+  "revision": "862006b",
+  "command": ".\\.venv\\Scripts\\python.exe scripts/reproduce_stage2_defect.py",
+  "input": {
+    "initial_stock": 10,
+    "quantity": 2,
+    "action": "Оплатить → отменить без подтверждённого возврата"
+  },
+  "expected": {
+    "cancel_allowed": false,
+    "stock": 8,
+    "refunds": 0
+  },
+  "actual": {
+    "cancel_allowed": true,
+    "stock_before": 8,
+    "stock_after": 10,
+    "refunds": 0
+  },
+  "defect_reproduced": true
+}

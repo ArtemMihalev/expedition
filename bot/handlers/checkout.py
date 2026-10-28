@@ -171,7 +171,8 @@ async def checkout_confirm(
 
     if order_id is None:
         await callback.answer(status, show_alert=True)
-        await state.clear()
+        if not status.startswith("Склад занят"):
+            await state.clear()
         return
 
     await callback.answer("✅ Заказ оформлен!")
@@ -184,28 +185,8 @@ async def checkout_confirm(
 
 
 async def _show_success(callback: CallbackQuery, order_id: int, order: dict | None) -> None:
-    pickup_label = PICKUP_OPTIONS.get(
-        order["pickup_method"] if order else "", "—"
-    )
-    status_label = ORDER_STATUS_LABELS.get(
-        order["status"] if order else "new", "Новый"
-    )
-    total = order["total"] if order else 0
-    if order and order['payment_status'] == 'pending':
-        status_label = 'Ожидает оплаты'
-
-    text = (
-        f"🎉 <b>Заказ №{order_id} оформлен!</b>\n\n"
-        f"💰 Сумма: <b>{total:.2f} ₽</b>\n"
-        f"📍 Получение: {pickup_label}\n"
-        f"💳 {PAYMENT_LABELS[order['payment_method']]}\n"
-        f"📊 Статус: <b>{status_label}</b>\n\n"
-        "Статус доступен в разделе «Мои заказы»."
-    )
-    await show_text(callback.message,
-        text,
-        reply_markup=keyboards.order_actions(order),
-    )
+    from bot.handlers.orders import format_order
+    await show_text(callback.message, format_order(order), reply_markup=keyboards.order_actions(order))
 
 
 @router.callback_query(F.data.startswith("confirm:"))

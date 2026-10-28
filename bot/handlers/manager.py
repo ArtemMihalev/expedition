@@ -124,7 +124,7 @@ async def manager_stock_product(callback: CallbackQuery, db: Database) -> None:
     if not product:
         await callback.answer("Товар не найден.", show_alert=True)
         return
-    await show_text(callback.message, f"📦 <b>{escape(product['name'])}</b>\nСвободный остаток: {product['stock']} шт.", reply_markup=keyboards.stock_actions(product['id']))
+    await show_text(callback.message, f"📦 <b>{escape(product['name'])}</b>\nНа складе: {product['on_hand']} · В резерве: {product['reserved']} · Доступно: {product['stock']} шт.", reply_markup=keyboards.stock_actions(product['id']))
     await callback.answer()
 
 
@@ -139,10 +139,10 @@ async def manager_stock_adjust(callback: CallbackQuery, db: Database) -> None:
     except ValueError:
         await callback.answer("Устаревшая кнопка.", show_alert=True)
         return
-    if delta not in {-1, 1, 5, 10} or not await db.adjust_stock(product_id, delta):
+    if delta not in {-1, 1, 5, 10} or not await db.adjust_stock(product_id, delta, callback.from_user.id):
         await callback.answer("Нельзя установить отрицательный остаток или товар не найден.", show_alert=True)
         return
     products = await db.get_stock_products()
     product = next(p for p in products if p['id'] == product_id)
-    await show_text(callback.message, f"📦 <b>{escape(product['name'])}</b>\nСвободный остаток: {product['stock']} шт.", reply_markup=keyboards.stock_actions(product_id))
+    await show_text(callback.message, f"📦 <b>{escape(product['name'])}</b>\nНа складе: {product['on_hand']} · В резерве: {product['reserved']} · Доступно: {product['stock']} шт.", reply_markup=keyboards.stock_actions(product_id))
     await callback.answer("Остаток обновлён.")

@@ -3,7 +3,7 @@ const tg = window.Telegram?.WebApp;
 tg?.ready(); tg?.expand();
 const $ = id => document.getElementById(id);
 const state = {orders: [], operations: [], correction: null, requestId: crypto.randomUUID(), busy: false};
-const paymentLabels = {unpaid:'При получении',pending:'Ожидает оплаты',paid:'Оплачен',refunded:'Возвращён',canceled:'Платёж отменён'};
+const paymentLabels = {unpaid:'При получении',pending:'Ожидает оплаты',paid:'Оплачен',refunded:'Возвращён',canceled:'Платёж отменён',refund_pending:'Резерв закончился, оформляется возврат'};
 const orderLabels = {new:'Новый',ready:'Готов к выдаче',completed:'Выдан',cancelled:'Отменён'};
 const methodLabels = {cash_on_pickup:'При получении',yookassa_test:'ЮKassa Test',demo:'Демонстрация без платёжного провайдера'};
 const opLabels = {receipt:'Поступление',refund:'Полный возврат',expense:'Расход'};
@@ -24,7 +24,7 @@ function askConfirmation(text) {
 }
 function button(text, action, cls='outline') { const node=el('button',text,cls); node.type='button'; node.onclick=()=>guard(()=>action(node)); return node; }
 function badge(text, status) { return el('span',text,'badge '+status); }
-function setTab(name) {document.querySelectorAll('.tab').forEach(n=>n.hidden=n.id!==name);document.querySelectorAll('[data-tab]').forEach(n=>n.classList.toggle('active',n.dataset.tab===name));$('period').hidden=name==='expenses'||name==='orders';}
+function setTab(name) {document.querySelectorAll('.tab').forEach(n=>n.hidden=n.id!==name);document.querySelectorAll('[data-tab]').forEach(n=>n.classList.toggle('active',n.dataset.tab===name));$('period').hidden=['expenses','orders','inventory'].includes(name);}
 async function guard(action) {if(state.busy)return;state.busy=true;document.querySelectorAll('button').forEach(n=>n.disabled=true);try{await action();}catch(e){error(e.message);}finally{state.busy=false;document.querySelectorAll('button').forEach(n=>n.disabled=false);}}
 async function api(path, data) {
   if(!tg?.initData)throw new Error('Откройте кабинет кнопкой из Telegram-бота под аккаунтом менеджера. В обычном браузере финансовые данные недоступны.');
@@ -39,7 +39,10 @@ async function api(path, data) {
 }
 const query = () => new URLSearchParams({start:$('start').value,end:$('end').value}).toString();
 async function refresh() {
-  const [summary,orders,operations]=await Promise.all([api('summary?'+query()),api('orders'),api('operations?'+query())]);
+  const [summary,orders,operations,inventory]=await Promise.all([api('summary?'+query()),api('orders'),api('operations?'+query()),api('inventory')]);
+  renderInventory(inventory);
+  $('late-warning').hidden=!summary.pending_late_refunds;
+  $('late-warning').textContent='Поздние платежи: '+rub(summary.pending_late_refunds)+' временно поступили без продажи. Денежный поток уменьшится после подтверждения возвратов. Сумма ожидающих возвратов показана за все даты.';
   state.orders=orders;state.operations=operations;
   $('summary-period').textContent=summary.start+' — '+summary.end;
   for(const [id,key] of [['cash-flow','cash_flow'],['result','result'],['receipts','receipts'],['refunds','refunds'],['expenses-total','expenses'],['cost-paid','cost_paid'],['cost-returned','cost_returned']])$(id).textContent=rub(summary[key]);
@@ -77,6 +80,9 @@ async function openOrder(id) {
   $('dialog-error').hidden=true;
   const order=await api('orders/'+id), detail=$('order-detail');detail.replaceChildren();$('order-title').textContent='Заказ №'+id;
   line(detail,'Покупатель',order.customer_name);line(detail,'Статус',orderLabels[order.status]);line(detail,'Оплата',paymentLabels[order.payment_status]);line(detail,'Способ',methodLabels[order.payment_method]);line(detail,'Сумма',rub(order.total_kopecks));
+  if(order.conflict_reason)detail.append(el('p',order.conflict_reason,'banner'));
+  if(order.expires_at)line(detail,'Резерв до (Москва)',dateText(order.expires_at));
+  if(order.reservation_state)line(detail,'Состояние резерва',order.reservation_state);
   detail.append(el('h3','СОСТАВ ЗАКАЗА','detail-heading'));
   for(const item of order.items){line(detail,item.product_name+' × '+item.quantity,rub(item.price_kopecks*item.quantity));line(detail,'Себестоимость на момент заказа',item.cost_kopecks===null?'Не сохранена (старый заказ)':rub(item.cost_kopecks*item.quantity));}
   detail.append(el('h3','ПЛАТЕЖИ','detail-heading'));
@@ -89,7 +95,7 @@ async function openOrder(id) {
       const actions=el('div',undefined,'actions');
       if(order.payment_method==='demo'){
         detail.append(el('p','Демонстрация без платёжного провайдера. До следующего подтверждения сводка не меняется.'));
-        actions.append(button('Демо: подтвердить возврат',()=>refundAction(id,'refunds/'+refund.id+'/demo',{outcome:'succeeded'})),button('Демо: ошибка возврата',()=>refundAction(id,'refunds/'+refund.id+'/demo',{outcome:'canceled'}),'danger'));
+        actions.append(button('Повторить проверку возврата',()=>refundAction(id,'refunds/'+refund.id+'/demo',{outcome:'succeeded'})));
       } else actions.append(button('Проверить у ЮKassa',()=>refundAction(id,'refunds/'+refund.id+'/check',{})));
       detail.append(actions);
     }
@@ -114,3 +120,40 @@ $('expense-form').onsubmit=e=>{e.preventDefault();guard(async()=>{
 window.addEventListener('offline',()=>error('Нет сети. Показанные данные могут быть устаревшими; изменения не подтверждены.'));
 const today=moscowDate();$('start').value=today.slice(0,7)+'-01';$('end').value=today;$('expense-date').value=today;
 guard(async()=>{const meta=await api('meta');for(const [key,name]of Object.entries(meta.categories)){const option=el('option',name);option.value=key;$('category').append(option);}await refresh();});
+
+let receiptKey=crypto.randomUUID();
+let serverOffset=0;
+function renderInventory(data){
+  serverOffset=new Date(data.server_time.replace(' ','T')+'Z').getTime()-Date.now();
+  const stock=$('stock-list'), select=$('receipt-product'), old=select.value;
+  stock.replaceChildren();select.replaceChildren();
+  for(const p of data.products){
+    const row=el('article',undefined,'row'), content=el('div');
+    content.append(el('h3',p.name),el('p','На складе: '+p.on_hand+' · В резерве: '+p.reserved+' · Доступно: '+p.available));
+    row.append(content);stock.append(row);
+    const option=el('option',p.name);option.value=p.id;select.append(option);
+  }
+  if(old)select.value=old;
+  const reserves=$('reservation-list');reserves.replaceChildren();
+  for(const r of data.reservations){
+    const row=el('article',undefined,'row'), timer=el('span');timer.dataset.expires=r.expires_at;
+    row.append(button('Заказ №'+r.order_id,()=>openOrder(r.order_id)),timer);reserves.append(row);
+  }
+  if(!data.reservations.length)reserves.append(el('p','Активных резервов нет.'));
+  const problems=$('problem-list');problems.replaceChildren();
+  for(const r of data.problems){
+    const row=el('article',undefined,'panel');
+    row.append(button('Заказ №'+r.order_id,()=>openOrder(r.order_id)),el('p',(r.reason==='late'?'Поздняя оплата · денежный возврат':'Возврат принятой продажи')+' · '+r.status),el('p',r.conflict_reason||''));
+    if(r.error)row.append(el('p',r.error,'banner'));
+    row.append(el('p','Попыток: '+r.attempts+' · ключ: '+r.attempt_key));problems.append(row);
+  }
+  if(!data.problems.length)problems.append(el('p','Проблемных платежей нет.'));
+  const journal=$('movement-list');journal.replaceChildren();
+  const labels={opening:'Остаток до миграции',receipt:'Поступление',adjustment:'Корректировка',reserve:'Резерв',consumed:'Продажа',expired:'Срок истёк',cancelled:'Отмена',sale_return:'Возврат товара',legacy_hold:'Перенос старого резерва'};
+  for(const m of data.movements){const row=el('article',undefined,'row'), content=el('div');content.append(el('h3',(labels[m.kind]||m.kind)+' · товар №'+m.product_id),el('p','На складе '+(m.on_hand_delta>=0?'+':'')+m.on_hand_delta+' · В резерве '+(m.reserved_delta>=0?'+':'')+m.reserved_delta),el('p',dateText(m.created_at)+' · автор '+m.author_id));row.append(content);if(m.order_id)row.append(button('Заказ №'+m.order_id,()=>openOrder(m.order_id)));journal.append(row);}
+  updateTimers();
+}
+function updateTimers(){for(const node of document.querySelectorAll('[data-expires]')){const remaining=Math.max(0,Math.ceil((new Date(node.dataset.expires.replace(' ','T')+'Z').getTime()-Date.now()-serverOffset)/1000));node.textContent=remaining?'Осталось '+remaining+' с':'Срок истёк · обновите данные';}}
+setInterval(updateTimers,1000);
+$('receipt-form').addEventListener('input',()=>{receiptKey=crypto.randomUUID();});
+$('receipt-form').onsubmit=e=>{e.preventDefault();guard(async()=>{await api('inventory/receipts',{product_id:Number($('receipt-product').value),quantity:Number($('receipt-quantity').value),request_id:receiptKey});receiptKey=crypto.randomUUID();$('receipt-quantity').value='';await refresh();notice('Поступление подтверждено сервером.');});};

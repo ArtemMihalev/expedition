@@ -1,0 +1,12 @@
+................Уведомление заказа 1 не доставлено
+....................2026-10-23 11:01:01,219 [INFO] root: База данных инициализирована: C:\Users\328F~1\AppData\Local\Temp\tmpjiwcaz4j\test.db
+2026-10-23 11:01:01,219 [INFO] root: Expedition: карточки с фото включены; проект=F:\web\expedition; PID=2776
+2026-10-23 11:01:01,227 [INFO] root: Найдено изображений товаров: 6 из 6
+2026-10-23 11:01:01,258 [INFO] asyncio: <Server sockets=(<asyncio.TransportSocket fd=620, family=2, type=1, proto=6, laddr=('127.0.0.1', 50898)>,)> is serving
+2026-10-23 11:01:01,259 [INFO] root: Mini App: http://127.0.0.1:0
+2026-10-23 11:01:01,259 [INFO] root: Бот Expedition запущен
+...
+----------------------------------------------------------------------
+Ran 39 tests in 19.757s
+
+OK

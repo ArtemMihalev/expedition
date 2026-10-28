@@ -10,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.config import BOT_TOKEN, DATABASE_PATH, WEB_HOST, WEB_PORT
+from bot.config import BOT_TOKEN, DATABASE_PATH, WEB_HOST, WEB_PORT, RESERVE_SECONDS
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан. Создайте файл .env на основе .env.example")
@@ -29,7 +29,7 @@ async def main() -> None:
         stream=sys.stdout,
     )
 
-    db = Database(DATABASE_PATH)
+    db = Database(DATABASE_PATH, reserve_seconds=RESERVE_SECONDS)
     await db.init_db()
     logging.info("База данных инициализирована: %s", DATABASE_PATH)
     logging.info("Expedition: карточки с фото включены; проект=%s; PID=%s", PROJECT_ROOT, os.getpid())

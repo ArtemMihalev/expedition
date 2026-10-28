@@ -18,6 +18,8 @@ class PaymentsTests(unittest.IsolatedAsyncioTestCase):
         self.path = str(Path(self.tmp.name) / 'test.db')
         self.db = Database(self.path)
         await self.db.init_db()
+        for pid in range(1,7):
+            await self.db.receive_stock(pid,10,999,f"fixture:{pid}")
         await self.db.upsert_user(101, None, 'Student')
         await self.db.upsert_user(202, None, 'Other')
         await self.db.add_to_cart(101, 1, 2)
@@ -50,7 +52,7 @@ class PaymentsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cash_duplicate_empty_and_manager(self):
         self.assertFalse(await self.db.update_order_status(self.oid, 'ready'))
-        duplicate, status = await self.db.confirm_order(101, self.token, 'Student', 'store')
+        duplicate, status = await self.db.confirm_order(101, self.token, 'Student', 'store', 'yookassa_test')
         self.assertEqual((duplicate, status), (self.oid, 'already_confirmed'))
         token = await self.db.create_checkout_token(202)
         oid, _ = await self.db.confirm_order(202, token, 'Other', 'store')

@@ -1,5 +1,6 @@
 from bot.ui import show_text
 from html import escape
+from datetime import datetime, timezone
 
 from aiogram import Router
 from aiogram.types import CallbackQuery
@@ -35,6 +36,12 @@ def format_order(order: dict) -> str:
             f"{item['product_price']:.2f} ₽ = {subtotal:.2f} ₽"
         )
     lines.append(f"\n💰 <b>Итого: {order['total']:.2f} ₽</b>")
+    if order.get('expires_at') and order.get('reservation_state') == 'active':
+        seconds=max(0,int((datetime.fromisoformat(order['expires_at']).replace(tzinfo=timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
+        lines.append(f'\nРезерв: ещё {seconds} с. Обновите заказ для актуального времени.')
+        lines.append('Подтверждение после срока запускает возврат, даже если вы нажали оплату раньше.')
+    if order.get('conflict_reason'):
+        lines.append('\n'+order['conflict_reason'])
     return "\n".join(lines)
 
 
@@ -60,7 +67,7 @@ async def my_orders(callback: CallbackQuery, db: Database) -> None:
 async def cancel_order_prompt(callback: CallbackQuery, db: Database) -> None:
     value = callback.data.partition(":")[2]
     order = await db.get_order(int(value), callback.from_user.id) if value.isdigit() else None
-    if not order or order["status"] not in {"new", "ready"}:
+    if not order or order["status"] not in {"new", "ready"} or order["payment_status"] in {"paid","refund_pending","refunded"}:
         await callback.answer("Заказ недоступен для отмены или уже закрыт.", show_alert=True)
         return
     text = f"Отменить заказ №{order['id']}? Зарезервированные товары вернутся на склад."

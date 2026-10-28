@@ -30,6 +30,6 @@ def validate_init_data(raw: str, token: str, managers: set[int], ttl: int = 3600
             raise ValueError
     except (ValueError, KeyError, TypeError, json.JSONDecodeError):
         raise PermissionError('Недействительная или устаревшая авторизация. Откройте кабинет заново из бота.') from None
-    if user_id not in managers:
+    if managers is not None and user_id not in managers:
         raise PermissionError('Финансовый кабинет доступен только менеджеру.')
     return user_id

@@ -46,12 +46,14 @@ class FinanceTests(unittest.IsolatedAsyncioTestCase):
         self.path = str(Path(self.tmp.name) / 'finance.db')
         self.db = Database(self.path)
         await self.db.init_db()
+        for pid in range(1,7):
+            await self.db.receive_stock(pid,10,999,f"fixture:{pid}")
         await self.db.upsert_user(101, None, 'Buyer A')
         await self.db.upsert_user(202, None, 'Buyer B')
         async with self.db.connection() as conn:
             await conn.execute('UPDATE products SET price=1200,price_kopecks=120000,cost_kopecks=70000 WHERE id=1')
             await conn.commit()
-        self.client = TestClient(TestServer(create_app(self.db, bot_token=TOKEN, managers={999})))
+        self.client = TestClient(TestServer(create_app(self.db, bot_token=TOKEN, managers={999}, workers=False)))
         await self.client.start_server()
         self.headers = {'Authorization': 'tma '+init_data()}
 
@@ -79,8 +81,7 @@ class FinanceTests(unittest.IsolatedAsyncioTestCase):
             await self.db.demo_payment(oid, 101, 'succeeded')
         totals = await self.totals()
         self.assertEqual((totals['receipts'], totals['cost_paid'], totals['cash_flow'], totals['result']), (120000, 70000, 120000, 50000))
-        with self.assertRaises(ValueError):
-            await self.db.demo_payment(oid, 101, 'succeeded')
+        await self.db.demo_payment(oid, 101, 'succeeded')
         async with self.db.connection() as conn:
             self.assertEqual((await (await conn.execute('SELECT COUNT(*) FROM finance_notifications')).fetchone())[0], 1)
         data = self.expense_data()
@@ -123,9 +124,10 @@ class FinanceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.db.demo_payment(oid,202,'succeeded')
         await self.db.demo_payment(oid,101,'canceled')
-        with self.assertRaises(ValueError):
-            await self.db.demo_payment(oid,101,'succeeded')
         self.assertEqual((await self.totals())['receipts'],0)
+        await self.db.demo_payment(oid,101,'succeeded')
+        self.assertEqual((await self.db.get_order(oid))['payment_status'],'refund_pending')
+        self.assertEqual((await self.totals())['cost_paid'],0)
 
     async def test_expense_validation_correction_and_audit(self):
         for amount in ('0','-1','0.001','nan','Infinity','bad'):
@@ -177,6 +179,8 @@ class FinanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.totals())['expenses'],0)
 
     async def test_refund_from_previous_period(self):
+        from datetime import datetime, timezone
+        self.db.clock=lambda: datetime(2026,9,30,12,tzinfo=timezone.utc)
         oid=await self.make_order()
         with patch('bot.database.finance.now',return_value='2026-09-30 12:00:00'):
             await self.db.demo_payment(oid,101,'succeeded')

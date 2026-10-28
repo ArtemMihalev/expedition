@@ -1,4 +1,6 @@
 from decimal import Decimal
+from datetime import datetime, timezone
+from bot.database.inventory import InventoryMixin
 import aiosqlite
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -71,17 +73,25 @@ PRODUCT_IMAGES = dict(zip(
 ))
 
 
-class Database(FinanceMixin):
-    def __init__(self, db_path: str):
+class Database(InventoryMixin, FinanceMixin):
+    def __init__(self, db_path: str, reserve_seconds=120, clock=None, training=False):
         self.db_path = db_path
+        self.reserve_seconds = reserve_seconds
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.training = training
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[aiosqlite.Connection]:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as conn:
+        async with aiosqlite.connect(self.db_path, timeout=1) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
+            await conn.execute("PRAGMA busy_timeout = 1000")
+            try:
+                yield conn
+            finally:
+                if conn.in_transaction:
+                    await conn.rollback()
 
     async def init_db(self) -> None:
         async with self.connection() as conn:
@@ -157,7 +167,7 @@ class Database(FinanceMixin):
                     await conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
             product_columns = {row["name"] for row in await (await conn.execute("PRAGMA table_info(products)")).fetchall()}
             for name, definition in {
-                "stock": "INTEGER NOT NULL DEFAULT 10 CHECK(stock >= 0)",
+                "stock": "INTEGER NOT NULL DEFAULT 0 CHECK(stock >= 0)",
                 "image_path": "TEXT",
             }.items():
                 if name not in product_columns:
@@ -184,6 +194,7 @@ class Database(FinanceMixin):
             await conn.commit()
 
         await self.init_finance()
+        await self.init_inventory()
 
     async def upsert_user(
         self, user_id: int, username: str | None, first_name: str | None
@@ -206,7 +217,7 @@ class Database(FinanceMixin):
             if category:
                 cursor = await conn.execute(
                     """
-                    SELECT * FROM products
+                    SELECT *, stock AS on_hand, stock-reserved AS available FROM products
                     WHERE is_available = 1 AND category = ?
                     ORDER BY id
                     """,
@@ -215,22 +226,22 @@ class Database(FinanceMixin):
             else:
                 cursor = await conn.execute(
                     """
-                    SELECT * FROM products
+                    SELECT *, stock AS on_hand, stock-reserved AS available FROM products
                     WHERE is_available = 1
                     ORDER BY category, id
                     """
                 )
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r, stock=r["available"]) for r in rows]
 
     async def get_product(self, product_id: int) -> dict | None:
         async with self.connection() as conn:
             cursor = await conn.execute(
-                "SELECT * FROM products WHERE id = ? AND is_available = 1",
+                "SELECT *, stock AS on_hand, stock-reserved AS available FROM products WHERE id = ? AND is_available = 1",
                 (product_id,),
             )
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            return dict(row, stock=row["available"]) if row else None
 
     async def get_categories(self) -> list[tuple[str, str]]:
         async with self.connection() as conn:
@@ -248,8 +259,8 @@ class Database(FinanceMixin):
         if type(quantity) is not int or quantity <= 0:
             return False
         async with self.connection() as conn:
-            await conn.execute("BEGIN IMMEDIATE")
-            product = await (await conn.execute("SELECT stock, is_available FROM products WHERE id = ?", (product_id,))).fetchone()
+            await self.begin(conn)
+            product = await (await conn.execute("SELECT stock-reserved AS stock, is_available FROM products WHERE id = ?", (product_id,))).fetchone()
             if not product or not product["is_available"]:
                 return False
             cursor = await conn.execute(
@@ -283,7 +294,7 @@ class Database(FinanceMixin):
             cursor = await conn.execute(
                 """
                 SELECT ci.id AS cart_item_id, ci.quantity,
-                       p.id AS product_id, p.name, p.price_kopecks / 100.0 AS price, p.price_kopecks, p.description, p.stock, p.is_available
+                       p.id AS product_id, p.name, p.price_kopecks / 100.0 AS price, p.price_kopecks, p.description, p.stock-p.reserved AS available, p.stock-p.reserved AS stock, p.is_available
                 FROM cart_items ci
                 JOIN products p ON p.id = ci.product_id
                 WHERE ci.user_id = ?
@@ -292,7 +303,7 @@ class Database(FinanceMixin):
                 (user_id,),
             )
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r, stock=r["available"]) for r in rows]
 
     async def get_cart_total(self, user_id: int) -> float:
         cart = await self.get_cart(user_id)
@@ -304,10 +315,10 @@ class Database(FinanceMixin):
         if type(quantity) is not int or quantity <= 0:
             return False, "Количество должно быть больше нуля."
         async with self.connection() as conn:
-            await conn.execute("BEGIN IMMEDIATE")
+            await self.begin(conn)
             cursor = await conn.execute(
                 """
-                SELECT ci.id, p.stock, p.is_available FROM cart_items ci
+                SELECT ci.id, p.stock-p.reserved AS stock, p.is_available FROM cart_items ci
                 JOIN products p ON p.id = ci.product_id
                 WHERE ci.user_id = ? AND ci.product_id = ?
                 """,
@@ -362,114 +373,15 @@ class Database(FinanceMixin):
         pickup_method: str,
         payment_method: str = PAYMENT_METHOD,
     ) -> tuple[int | None, str]:
-        """Атомарно переносит корзину в заказ. Защита от дубликатов по токену."""
-        if payment_method not in {PAYMENT_METHOD, "yookassa_test", "demo"}:
-            return None, "Неверный способ оплаты."
-        async with self.connection() as conn:
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-
-                cursor = await conn.execute(
-                    """
-                    SELECT token, order_id FROM checkout_tokens
-                    WHERE token = ? AND user_id = ?
-                    """,
-                    (confirm_token, user_id),
-                )
-                token_row = await cursor.fetchone()
-
-                if not token_row:
-                    await conn.execute("ROLLBACK")
-                    return None, "Сессия оформления не найдена. Начните заново."
-
-                if token_row["order_id"]:
-                    await conn.execute("ROLLBACK")
-                    return token_row["order_id"], "already_confirmed"
-
-                cursor = await conn.execute(
-                    """
-                    SELECT ci.product_id, ci.quantity, p.name, p.price, p.price_kopecks, p.cost_kopecks, p.stock, p.is_available
-                    FROM cart_items ci
-                    JOIN products p ON p.id = ci.product_id
-                    WHERE ci.user_id = ?
-                    """,
-                    (user_id,),
-                )
-                cart_items = await cursor.fetchall()
-
-                if not cart_items:
-                    await conn.execute("ROLLBACK")
-                    return None, "Корзина пуста. Добавьте товары перед оформлением."
-
-                for item in cart_items:
-                    if not item["is_available"] or item["quantity"] > item["stock"]:
-                        await conn.execute("ROLLBACK")
-                        return None, f"Недостаточно товара «{item['name']}»: доступно {item['stock']} шт. Измените корзину."
-                    if item['cost_kopecks'] is None:
-                        await conn.execute('ROLLBACK')
-                        return None, 'У товара не задана учебная себестоимость. Обратитесь к менеджеру.'
-
-                total_kopecks = sum(r["price_kopecks"] * r["quantity"] for r in cart_items)
-                total = total_kopecks / 100
-
-                cursor = await conn.execute(
-                    """
-                    INSERT INTO orders
-                        (user_id, customer_name, pickup_method, payment_method, total, status)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user_id,
-                        customer_name,
-                        pickup_method,
-                        payment_method,
-                        total,
-                        ORDER_STATUS_NEW,
-                    ),
-                )
-                order_id = cursor.lastrowid
-                await conn.execute(
-                    "UPDATE orders SET payment_status = ?, total_kopecks = ? WHERE id = ?",
-                    ("pending" if payment_method in {"yookassa_test", "demo"} else "unpaid", total_kopecks, order_id),
-                )
-
-                for item in cart_items:
-                    await conn.execute("UPDATE products SET stock = stock - ? WHERE id = ?", (item["quantity"], item["product_id"]))
-                    await conn.execute(
-                        """
-                        INSERT INTO order_items
-                            (order_id, product_name, product_price, quantity, product_id, price_kopecks, cost_kopecks)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (order_id, item["name"], item["price_kopecks"] / 100, item["quantity"], item["product_id"], item["price_kopecks"], item["cost_kopecks"]),
-                    )
-
-                await conn.execute("UPDATE orders SET stock_deducted = 1 WHERE id = ?", (order_id,))
-
-                await conn.execute(
-                    "DELETE FROM cart_items WHERE user_id = ?", (user_id,)
-                )
-                await conn.execute(
-                    """
-                    UPDATE checkout_tokens SET order_id = ? WHERE token = ?
-                    """,
-                    (order_id, confirm_token),
-                )
-                await self.create_pending_payment(conn, order_id, total_kopecks, payment_method)
-                await conn.execute("COMMIT")
-                return order_id, "ok"
-
-            except Exception:
-                await conn.execute("ROLLBACK")
-                raise
+        return await self.checkout(user_id, confirm_token, customer_name, pickup_method, payment_method)
 
     async def get_user_orders(self, user_id: int) -> list[dict]:
         async with self.connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM orders
-                WHERE user_id = ?
-                ORDER BY created_at DESC
+                SELECT o.*,r.state AS reservation_state,r.expires_at FROM orders o LEFT JOIN reservations r ON r.order_id=o.id
+                WHERE o.user_id = ?
+                ORDER BY o.created_at DESC
                 """,
                 (user_id,),
             )
@@ -487,14 +399,14 @@ class Database(FinanceMixin):
             if user_id is not None:
                 cursor = await conn.execute(
                     """
-                    SELECT * FROM orders
-                    WHERE id = ? AND user_id = ?
+                    SELECT o.*,r.state AS reservation_state,r.expires_at FROM orders o LEFT JOIN reservations r ON r.order_id=o.id
+                    WHERE o.id = ? AND o.user_id = ?
                     """,
                     (order_id, user_id),
                 )
             else:
                 cursor = await conn.execute(
-                    "SELECT * FROM orders WHERE id = ?",
+                    "SELECT o.*,r.state AS reservation_state,r.expires_at FROM orders o LEFT JOIN reservations r ON r.order_id=o.id WHERE o.id = ?",
                     (order_id,),
                 )
             row = await cursor.fetchone()
@@ -532,39 +444,48 @@ class Database(FinanceMixin):
         if status not in ORDER_STATUS_LABELS:
             return False
         async with self.connection() as conn:
-            await conn.execute("BEGIN IMMEDIATE")
-            order = await (await conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,))).fetchone()
+            await self.begin(conn)
+            order = await (await conn.execute("SELECT o.*,r.state AS reservation_state,r.expires_at FROM orders o LEFT JOIN reservations r ON r.order_id=o.id WHERE o.id = ?", (order_id,))).fetchone()
             if user_id is not None and (not order or order["user_id"] != user_id or status != "cancelled"):
                 return False
             if not order or order["status"] == status or order["status"] in {"completed", "cancelled"}:
                 return False
             if order["payment_method"] in {"yookassa_test", "demo"} and order["payment_status"] != "paid" and status != "cancelled":
                 return False
-            if status == "cancelled" and order["stock_deducted"]:
-                items = await (await conn.execute("SELECT product_id, quantity FROM order_items WHERE order_id = ?", (order_id,))).fetchall()
-                for item in items:
-                    if item["product_id"] is not None:
-                        await conn.execute("UPDATE products SET stock = stock + ? WHERE id = ?", (item["quantity"], item["product_id"]))
-                await conn.execute("UPDATE orders SET stock_deducted = 0 WHERE id = ?", (order_id,))
-            if status == 'cancelled' and order['payment_status'] == 'pending':
-                await conn.execute("UPDATE payments SET status='canceled',confirmed_at=datetime('now') WHERE order_id=? AND status='pending'", (order_id,))
-                await conn.execute("UPDATE orders SET payment_status='canceled' WHERE id=?", (order_id,))
+            reservation = await (await conn.execute('SELECT * FROM reservations WHERE order_id=?', (order_id,))).fetchone()
+            if status == 'cancelled':
+                if order['payment_status'] in {'paid','refund_pending','refunded'}:
+                    return False
+                await self._transition_reservation(conn, order_id, 'cancelled')
+            elif reservation and reservation['state'] != 'consumed':
+                if order['payment_method'] != 'cash_on_pickup':
+                    return False
+                if self.timestamp() >= reservation['expires_at']:
+                    await self._transition_reservation(conn, order_id, 'expired')
+                    await conn.commit()
+                    return False
+                if status == 'completed':
+                    if not await self._transition_reservation(conn, order_id, 'consumed'):
+                        return False
             await conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
             await conn.commit()
             return True
 
     async def get_stock_products(self) -> list[dict]:
         async with self.connection() as conn:
-            return [dict(row) for row in await (await conn.execute("SELECT * FROM products ORDER BY id")).fetchall()]
+            return [dict(row, stock=row["available"]) for row in await (await conn.execute("SELECT *, stock AS on_hand, stock-reserved AS available FROM products ORDER BY id")).fetchall()]
 
-    async def adjust_stock(self, product_id: int, delta: int) -> bool:
+    async def adjust_stock(self, product_id: int, delta: int, author_id: int = 0) -> bool:
+        # Legacy manager controls still go through the same journal and bounds.
         if type(delta) is not int or delta == 0:
             return False
         async with self.connection() as conn:
-            cursor = await conn.execute("UPDATE products SET stock = stock + ? WHERE id = ? AND stock + ? >= 0", (delta, product_id, delta))
+            await self.begin(conn)
+            cur = await conn.execute('UPDATE products SET stock=stock+? WHERE id=? AND stock+?>=reserved', (delta, product_id, delta))
+            if cur.rowcount:
+                await self.movement(conn, product_id, 'adjustment', delta, 0, author=author_id)
             await conn.commit()
-            return cursor.rowcount > 0
-
+            return bool(cur.rowcount)
 
     @staticmethod
     def amount_kopecks(order: dict) -> int:
@@ -574,14 +495,15 @@ class Database(FinanceMixin):
         order = await self.get_order(order_id, user_id)
         return bool(order and order["payment_method"] == "yookassa_test"
                     and order["payment_status"] == "pending" and order["status"] == "new"
-                    and currency == "RUB" and amount == self.amount_kopecks(order))
+                    and currency == "RUB" and amount == self.amount_kopecks(order)
+                    and order.get("reservation_state") == "active" and self.timestamp() < order["expires_at"])
 
     async def record_payment(self, order_id: int, user_id: int, currency: str, amount: int,
                              telegram_charge: str, provider_charge: str) -> bool:
         if not telegram_charge or not provider_charge:
             return False
         async with self.connection() as conn:
-            await conn.execute("BEGIN IMMEDIATE")
+            await self.begin(conn)
             row = await (await conn.execute("SELECT * FROM orders WHERE id = ? AND user_id = ?",
                                            (order_id, user_id))).fetchone()
             if not row:

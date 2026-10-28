@@ -25,6 +25,8 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
         self.path = str(Path(self.tmp.name) / "shop.db")
         self.db = Database(self.path)
         await self.db.init_db()
+        for pid in range(1,7):
+            await self.db.receive_stock(pid,10,999,f"fixture:{pid}")
         for user in (101, 202):
             await self.db.upsert_user(user, None, "Student")
 
@@ -176,6 +178,7 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
         conn.close()
         migrated = Database(legacy_path)
         await migrated.init_db()
+        await migrated.receive_stock(1,10,999,'legacy-receipt')
         self.assertEqual((await migrated.get_order(1, 101))['items'][0]['product_price'], 500)
         self.assertTrue(await migrated.update_order_status(1, 'cancelled'))
         self.assertEqual((await migrated.get_product(1))['stock'], 10)
@@ -201,9 +204,12 @@ class InventoryTests(unittest.IsolatedAsyncioTestCase):
         order = await self.db.get_order(oid, 101)
         await self.db.record_payment(oid, 101, 'RUB', self.db.amount_kopecks(order), 'tg', 'yk')
         await self.db.update_order_status(oid, 'ready')
-        self.assertTrue(await self.db.update_order_status(oid, 'cancelled', user_id=101))
+        self.assertFalse(await self.db.update_order_status(oid, 'cancelled', user_id=101))
         self.assertEqual((await self.db.get_order(oid, 101))['payment_status'], 'paid')
-        self.assertEqual((await self.db.get_product(1))['stock'], 10)
+        self.assertEqual((await self.db.get_product(1))['stock'], 9)
+        refund=await self.db.start_refund(oid,999)
+        await self.db.complete_refund(refund['id'],'test-sale-return',refund['amount_kopecks'],'RUB')
+        self.assertEqual((await self.db.get_product(1))['stock'],10)
         oid, _ = await self.order()
         await self.db.update_order_status(oid, 'completed')
         self.assertFalse(await self.db.update_order_status(oid, 'cancelled', user_id=101))
